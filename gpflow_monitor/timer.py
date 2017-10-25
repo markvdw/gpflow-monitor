@@ -16,9 +16,15 @@ import contextlib
 import time
 
 
-class ElapsedTracker(object):
-    def __init__(self, elapsed=0.0):
+class ElapsedTracker:
+    def __init__(self, elapsed=0):
         self._elapsed = elapsed
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
 
     def add(self, time):
         self._elapsed += time
@@ -40,12 +46,8 @@ class Stopwatch(ElapsedTracker):
         return self
 
     def stop(self):
-        if self._start_time is not None:
-            self._elapsed += time.time() - self._start_time
+        self._elapsed = self.elapsed
         self._start_time = None
-
-    def add(self, time):
-        self._elapsed += time
 
     @property
     def running(self):

@@ -31,8 +31,13 @@ class Trigger(enum.Enum):
     ITER = 3
 
 
-class Task(object, metaclass=abc.ABCMeta):
+class Task(metaclass=abc.ABCMeta):
     def __init__(self, sequence, trigger: Trigger):
+        """
+        :param sequence: Sequence of times at which Task needs to be executed. If None, the task
+        will only be executed at the end of optimisation.
+        :param trigger: Timer in `ManagedOptimisation` to use for determining execution.
+        """
         # Construct the object before compile. You can do graph manipulations here.
         self._seq = sequence
         self._trigger = trigger
@@ -54,11 +59,8 @@ class Task(object, metaclass=abc.ABCMeta):
             self.times_called.add(1)
 
         # Move to the next trigger time, and make sure it's after this current iteration
-        while True:
-            if self._next <= manager.timers[self._trigger].elapsed:
-                self._next = next(self._seq)
-            else:
-                break
+        while self._next <= manager.timers[self._trigger].elapsed:
+            self._next = next(self._seq)
         self.time_spent.stop()
 
 
@@ -101,18 +103,28 @@ class TensorBoard(Task):
 
 class ModelTensorBoard(TensorBoard):
     def __init__(self, sequence, trigger: Trigger, model: gpflow.models.Model,
-                 file_writer: tf.summary.FileWriter, parameters=None, tensors=None):
+                 file_writer: tf.summary.FileWriter, parameters=None, additional_summaries=None):
+        """
+        Creates a Task that creates a sensible TensorBoard for a model.
+        :param sequence:
+        :param trigger:
+        :param model:
+        :param file_writer:
+        :param parameters: List of `gpflow.Parameter` objects to send to TensorBoard if they are
+        scalar. If None, all scalars will be sent to TensorBoard.
+        :param additional_summaries: List of Summary objects to send to TensorBoard.
+        """
         self.model = model
-        tensors = [] if tensors is None else tensors
+        all_summaries = [] if additional_summaries is None else additional_summaries
         if parameters is None:
-            tensors += [tf.summary.scalar(p.full_name, p.constrained_tensor)
-                        for p in model.parameters if p.size == 1]
-            tensors.append(tf.summary.scalar("likelihood", model._likelihood_tensor))
+            all_summaries += [tf.summary.scalar(p.full_name, p.constrained_tensor)
+                              for p in model.parameters if p.size == 1]
+            all_summaries.append(tf.summary.scalar("likelihood", model._likelihood_tensor))
         else:
-            tensors += [tf.summary.scalar(p.full_name, p.constrained_tensor)
-                        for p in parameters if p.size == 1]
+            all_summaries += [tf.summary.scalar(p.full_name, p.constrained_tensor)
+                              for p in parameters if p.size == 1]
 
-        super().__init__(sequence, trigger, tensors, file_writer)
+        super().__init__(sequence, trigger, all_summaries, file_writer)
 
 
 class LmlTensorBoard(ModelTensorBoard):
@@ -129,13 +141,15 @@ class LmlTensorBoard(ModelTensorBoard):
         with gpflow.decors.params_as_tensors_for(m):
             tfX, tfY = m.X, m.Y
 
-        lml = 0.0
         if self.verbose:
             import tqdm
             wrapper = tqdm.tqdm
         else:
             wrapper = lambda x: x
-        for mb in wrapper(range(-(-len(m.X._value) // self.minibatch_size))):
+
+        lml = 0.0
+        num_batches = -(-len(m.X._value) // self.minibatch_size)  # round up
+        for mb in wrapper(range(num_batches)):
             start = mb * self.minibatch_size
             finish = (mb + 1) * self.minibatch_size
             Xmb = m.X._value[start:finish, :]
@@ -170,22 +184,32 @@ class PrintTimings(Task):
         self._last_iter_timer = timer.Stopwatch().start()
 
 
+class FunctionCallback(Task):
+    def __init__(self, sequence, trigger, func):
+        super().__init__(sequence, trigger)
+        self._func = func
+
+    def _event_handler(self, manager):
+        self._func(manager)
+
+
 class PrintAllTimings(PrintTimings):
     def _event_handler(self, manager):
         super()._event_handler(manager)
         manager.print_timings()
 
 
-class ManagedOptimisation(object):
-    def __init__(self, model, optimiser, global_step):
-        # Must be called before compile()
+class ManagedOptimisation:
+    def __init__(self, model: gpflow.models.Model, optimiser: gpflow.training.optimizer.Optimizer,
+                 global_step):
         self._opt_method = optimiser
 
         # Setup timers
         total_time = timer.Stopwatch()
         optimisation_time = timer.Stopwatch()
         iter_count = timer.ElapsedTracker()
-        self.timers = {Trigger.TOTAL_TIME: total_time, Trigger.OPTIMISATION_TIME: optimisation_time,
+        self.timers = {Trigger.TOTAL_TIME: total_time,
+                       Trigger.OPTIMISATION_TIME: optimisation_time,
                        Trigger.ITER: iter_count}
         self.tasks = []
         self.model = model
@@ -199,16 +223,16 @@ class ManagedOptimisation(object):
             for task in self.tasks:
                 task(self, force_run)
 
-    def minimize(self, m, maxiter=0):
+    def minimize(self, maxiter=0):
         try:
-            [t.start() for t in self.timers.values() if type(t) is timer.Stopwatch]
+            [t.start() for t in self.timers.values()]
             while self.timers[Trigger.ITER].elapsed < maxiter:
-                m.session.run([self._opt_method.minimize_operation])
+                self.model.session.run([self._opt_method.minimize_operation])  # GPflow internal
                 self.timers[Trigger.ITER].add(1)
                 self.callback(force_run=False)
         finally:
             self.callback(force_run=True)
-            [t.stop() for t in self.timers.values() if type(t) is timer.Stopwatch]
+            [t.stop() for t in self.timers.values()]
 
     def print_timings(self):
         print("")
@@ -221,6 +245,11 @@ class ManagedOptimisation(object):
 
 
 def seq_exp_lin(growth, max, start=1.0, start_jump=None):
+    """
+    Returns an iterator that constructs a sequence beginning with `start`, growing exponentially:
+    the step size starts out as `start_jump` (if given, otherwise `start`), multiplied by `growth`
+    in each step. Once `max` is reached, growth will be linear with `max` step size.
+    """
     start_jump = start if start_jump is None else start_jump
     gap = start_jump
     last = start - start_jump
