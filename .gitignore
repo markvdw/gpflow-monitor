@@ -1,0 +1,14 @@
+*~
+.*
+*.pyc
+results/*
+datasets/*.zip
+datasets/*.tar.gz
+datasets/*.amat
+datasets/*.npz
+datasets/cifar-10-batches-py/
+*.aux
+*.log
+*.out
+*.bbl
+*.blg
