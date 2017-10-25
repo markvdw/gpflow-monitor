@@ -3,10 +3,10 @@ import enum
 import glob
 import os
 
+import gpflow
 import numpy as np
 import tensorflow as tf
 
-import gpflow
 from . import timer
 
 
@@ -99,6 +99,41 @@ class ModelTensorBoard(TensorBoard):
                         for p in parameters if p.size == 1]
 
         super().__init__(sequence, trigger, tensors, file_writer)
+
+
+class LmlTensorBoard(ModelTensorBoard):
+    def __init__(self, sequence, trigger: Trigger, model, file_writer, minibatch_size=100,
+                 verbose=True):
+        super().__init__(sequence, trigger, model, file_writer)
+        self.minibatch_size = minibatch_size
+        self._full_lml = tf.placeholder(gpflow.settings.tf_float, shape=())
+        self.summary = tf.summary.scalar("full lml", self._full_lml)
+        self.verbose = verbose
+
+    def _event_handler(self, manager):
+        m = manager.model
+        with gpflow.decors.params_as_tensors_for(m):
+            tfX, tfY = m.X, m.Y
+
+        lml = 0.0
+        if self.verbose:
+            import tqdm
+            wrapper = tqdm.tqdm
+        else:
+            wrapper = lambda x: x
+        for mb in wrapper(range(-(-len(m.X._value) // self.minibatch_size))):
+            start = mb * self.minibatch_size
+            finish = (mb + 1) * self.minibatch_size
+            Xmb = m.X._value[start:finish, :]
+            Ymb = m.Y._value[start:finish, :]
+            mb_lml = m.compute_log_likelihood(feed_dict={tfX: Xmb, tfY: Ymb})
+            lml += mb_lml * len(Xmb)
+        lml = lml / len(m.X._value)
+
+        summary, step = m.session.run([self.summary, manager.global_step],
+                                      feed_dict={self._full_lml: lml})
+        print("Full lml: %f (%.2e)" % (lml, lml))
+        self.file_writer.add_summary(summary, step)
 
 
 class PrintTimings(Task):
