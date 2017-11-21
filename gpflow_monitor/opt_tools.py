@@ -97,7 +97,7 @@ class TensorBoard(Task):
         self.file_writer = file_writer
 
     def _event_handler(self, manager):
-        summary, step = manager.model.session.run([self.summary, manager.global_step])
+        summary, step = manager.session.run([self.summary, manager.global_step])
         self.file_writer.add_summary(summary, step)
 
 
@@ -118,7 +118,7 @@ class ModelTensorBoard(TensorBoard):
         all_summaries = [] if additional_summaries is None else additional_summaries
         if parameters is None:
             all_summaries += [tf.summary.scalar(p.full_name, p.constrained_tensor)
-                              for p in model.parameters if p.size == 1]
+                              for p in model.parameters if len(p.shape) == 0]
             all_summaries.append(tf.summary.scalar("likelihood", model._likelihood_tensor))
         else:
             all_summaries += [tf.summary.scalar(p.full_name, p.constrained_tensor)
@@ -158,8 +158,8 @@ class LmlTensorBoard(ModelTensorBoard):
             lml += mb_lml * len(Xmb)
         lml = lml / len(m.X._value)
 
-        summary, step = m.session.run([self.summary, manager.global_step],
-                                      feed_dict={self._full_lml: lml})
+        summary, step = manager.session.run([self.summary, manager.global_step],
+                                             feed_dict={self._full_lml: lml})
         print("Full lml: %f (%.2e)" % (lml, lml))
         self.file_writer.add_summary(summary, step)
 
@@ -176,7 +176,8 @@ class PrintTimings(Task):
             total_iter = current_iter / manager.timers[Trigger.TOTAL_TIME].elapsed
             last_iter = (0.0 if not hasattr(self, '_last_iter')
                          else (current_iter - self._last_iter) / self._last_iter_timer.elapsed)
-        global_step_eval = manager.model.session.run(manager.global_step)
+
+        global_step_eval = manager.session.run(manager.global_step)
         print("\r%i, %i:\t%.2f optimisation iter/s\t%.2f total iter/s\t%.2f last iter/s" %
               (current_iter, global_step_eval, opt_iter, total_iter, last_iter), end='')
 
@@ -190,7 +191,7 @@ class FunctionCallback(Task):
         self._func = func
 
     def _event_handler(self, manager):
-        self._func(manager)
+        self._func(manager.model)
 
 
 class PrintAllTimings(PrintTimings):
@@ -201,8 +202,10 @@ class PrintAllTimings(PrintTimings):
 
 class ManagedOptimisation:
     def __init__(self, model: gpflow.models.Model, optimiser: gpflow.training.optimizer.Optimizer,
-                 global_step):
+                 global_step, session=None, var_list=None):
         self._opt_method = optimiser
+
+        self.session = model.enquire_session(session)
 
         # Setup timers
         total_time = timer.Stopwatch()
@@ -215,8 +218,10 @@ class ManagedOptimisation:
         self.model = model
         self.global_step = global_step
 
+
         # Setup optimiser variables etc
-        self._opt_method.minimize(model, maxiter=0, global_step=global_step)
+        self._opt_method.minimize(model, session=self.session,
+            maxiter=0, global_step=global_step, var_list=var_list)
 
     def callback(self, force_run):
         with self.timers[Trigger.OPTIMISATION_TIME].pause():
@@ -227,7 +232,7 @@ class ManagedOptimisation:
         try:
             [t.start() for t in self.timers.values()]
             while self.timers[Trigger.ITER].elapsed < maxiter:
-                self.model.session.run([self._opt_method.minimize_operation])  # GPflow internal
+                self.session.run([self._opt_method.minimize_operation])  # GPflow internal
                 self.timers[Trigger.ITER].add(1)
                 self.callback(force_run=False)
         finally:
