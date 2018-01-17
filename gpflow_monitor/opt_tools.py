@@ -236,6 +236,7 @@ class ManagedOptimisation:
                 self.timers[Trigger.ITER].add(1)
                 self.callback(force_run=False)
         finally:
+            self.model.anchor(self.session)
             self.callback(force_run=True)
             [t.stop() for t in self.timers.values()]
 
