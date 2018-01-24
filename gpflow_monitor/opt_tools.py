@@ -133,7 +133,7 @@ class LmlTensorBoard(ModelTensorBoard):
         super().__init__(sequence, trigger, model, file_writer)
         self.minibatch_size = minibatch_size
         self._full_lml = tf.placeholder(gpflow.settings.tf_float, shape=())
-        self.summary = tf.summary.scalar("full lml", self._full_lml)
+        self.summary = tf.summary.scalar("full_lml", self._full_lml)
         self.verbose = verbose
 
     def _event_handler(self, manager):
