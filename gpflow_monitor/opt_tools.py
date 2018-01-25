@@ -17,10 +17,10 @@ import enum
 import glob
 import os
 
-import gpflow
 import numpy as np
 import tensorflow as tf
 
+import gpflow
 from . import timer
 
 
@@ -159,7 +159,7 @@ class LmlTensorBoard(ModelTensorBoard):
         lml = lml / len(m.X._value)
 
         summary, step = manager.session.run([self.summary, manager.global_step],
-                                             feed_dict={self._full_lml: lml})
+                                            feed_dict={self._full_lml: lml})
         print("Full lml: %f (%.2e)" % (lml, lml))
         self.file_writer.add_summary(summary, step)
 
@@ -203,9 +203,8 @@ class PrintAllTimings(PrintTimings):
 class ManagedOptimisation:
     def __init__(self, model: gpflow.models.Model, optimiser: gpflow.training.optimizer.Optimizer,
                  global_step, session=None, var_list=None):
-        self._opt_method = optimiser
-
         self.session = model.enquire_session(session)
+        self.var_list = var_list
 
         # Setup timers
         total_time = timer.Stopwatch()
@@ -218,20 +217,24 @@ class ManagedOptimisation:
         self.model = model
         self.global_step = global_step
 
+        self.set_optimiser(optimiser)
 
+    def set_optimiser(self, optimiser):
+        self._opt_method = optimiser
         # Setup optimiser variables etc
-        self._opt_method.minimize(model, session=self.session,
-            maxiter=0, global_step=global_step, var_list=var_list)
+        self._opt_method.minimize(self.model, session=self.session,
+                                  maxiter=0, global_step=self.global_step, var_list=self.var_list)
 
     def callback(self, force_run):
         with self.timers[Trigger.OPTIMISATION_TIME].pause():
             for task in self.tasks:
                 task(self, force_run)
 
-    def minimize(self, maxiter=0):
+    def minimize(self, maxiter=0, max_global_step=np.inf):
         try:
             [t.start() for t in self.timers.values()]
-            while self.timers[Trigger.ITER].elapsed < maxiter:
+            while self.timers[Trigger.ITER].elapsed < maxiter and \
+                    self.session.run(self.global_step) < max_global_step:
                 self.session.run([self._opt_method.minimize_operation])  # GPflow internal
                 self.timers[Trigger.ITER].add(1)
                 self.callback(force_run=False)
