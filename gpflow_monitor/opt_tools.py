@@ -202,9 +202,19 @@ class PrintAllTimings(PrintTimings):
         manager.print_timings()
 
 
-class SaveFunction(Task):
+class SaveFunction(Task):   
+    """
+    Store and display the output of a function.
+    The function's output can have any shape. 
+    """
     def __init__(self, sequence, trigger: Trigger, file_writer,
                  function, output_dims: np.ndarray, name):
+        """
+        :param function: function without arguments (can also be an autoflow function)
+        :param output_dims: np.array indicating the shape of `function` outputs
+         Note:  if `function` outputs scalar values, we recommand using
+                the `SaveScalarFunction` task
+        """
         super().__init__(sequence, trigger)
         self.file_writer = file_writer
         self.function = function
@@ -224,13 +234,22 @@ class SaveFunction(Task):
 
 
 class SaveScalarFunction(SaveFunction):
+    """
+    Store and display the output of a scalar function.
+    """
     def __init__(self, sequence, trigger: Trigger, file_writer, function, name):
+        """
+        :param function: function without arguments, outputting a scalar
+        """
         super().__init__(sequence, trigger, file_writer, function, 1, name)
         self.pl = [tf.placeholder(tf.float64)]
         self.op = [tf.summary.scalar(self.name, self.pl[0])]
 
 
 class SaveFunctionAsHistogram(SaveFunction):
+    """
+    Store the function outputs as a histogram
+    """
     def __init__(self, *args):
         super().__init__(*args)
         self.pl = tf.placeholder(tf.float64, shape=self.output_dims)
@@ -244,11 +263,21 @@ class SaveFunctionAsHistogram(SaveFunction):
 
 
 class SaveImage(Task):
+    """
+    Store and display matplotlib images
+    """
     def __init__(self, sequence, trigger: Trigger, file_writer,
                  do_plotting, create_figure, name, num_channels=4):
         """
-        :param create_figure: function responsible for creating the figure and axes
-        :param do_plotting: function performing the actual plotting on the created axes
+        :param create_figure: function responsible for creating the figure and axes to draw on.
+        will typically look as follows:
+        ```
+        def create_figure():
+            return plt.subplots(nrows, ncols, *args, **kwargs)
+        ```
+        :param do_plotting: function performing the actual plotting on the created figure and axes.
+                            gets the figure and axes as arguments
+        :param num_channels: `3` for RBG and `4` for RBGA. 
         """
         super().__init__(sequence, trigger)
         self.file_writer = file_writer
@@ -261,7 +290,6 @@ class SaveImage(Task):
     def _event_handler(self, manager):
         fig, axes = self.create_figure()
         self.do_plotting(fig, axes)
-
         buf = io.BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight')
         buf.seek(0)
@@ -270,6 +298,8 @@ class SaveImage(Task):
         summary = manager.session.run([self.op, manager.global_step], {self.im: image})
         self.file_writer.add_summary(*summary)
         plt.close()
+        
+        
 class ManagedOptimisation:
     def __init__(self, model: gpflow.models.Model, optimiser: gpflow.training.optimizer.Optimizer,
                  global_step, session=None, var_list=None):
