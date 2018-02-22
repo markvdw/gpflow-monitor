@@ -221,6 +221,8 @@ class ManagedOptimisation:
 
     def set_optimiser(self, optimiser):
         self._opt_method = optimiser
+        if isinstance(self._opt_method, gpflow.train.ScipyOptimizer): return
+
         # Setup optimiser variables etc
         self._opt_method.minimize(self.model, session=self.session,
                                   maxiter=0, global_step=self.global_step, var_list=self.var_list)
@@ -230,7 +232,50 @@ class ManagedOptimisation:
             for task in self.tasks:
                 task(self, force_run)
 
+    def _scipy_callback(self, state: np.ndarray):
+        # chop flat state vector into the correctly shaped parts for all the params
+        start = 0
+        param_values = []
+        for var in self.model.trainable_tensors:
+            shape = var.get_shape().as_list()
+            size = np.prod(shape)
+            this_value = state[start:start+size]
+            param_values.append(this_value.reshape(shape))
+            start += size
+
+        # assign state
+        def _get_shape_tuple(tensor):
+            return tuple(dim.value for dim in tensor.get_shape())
+
+        from tensorflow.python.ops import array_ops, state_ops
+        _update_placeholders = [
+            array_ops.placeholder(var.dtype) for var in self.model.trainable_tensors
+        ]
+        _var_updates = [
+            var.assign(array_ops.reshape(placeholder, _get_shape_tuple(var)))
+            for var, placeholder in zip(self.model.trainable_tensors, _update_placeholders)
+        ]
+        self.session.run(_var_updates, feed_dict=dict(zip(_update_placeholders, param_values)))
+        # TODO- this should be part of GPflow internals!
+
+        self.session.run(state_ops.assign_add(self.global_step, 1).op)
+        self.timers[Trigger.ITER].add(1)
+        self.callback(force_run=False)
+
+    def minimize_scipy(self, maxiter=0):
+        try:
+            [t.start() for t in self.timers.values()]
+            self._opt_method.minimize(self.model, maxiter=maxiter, step_callback=self._scipy_callback)
+        finally:
+            self.model.anchor(self.session)
+            self.callback(force_run=True)
+            [t.stop() for t in self.timers.values()]
+
     def minimize(self, maxiter=0, max_global_step=np.inf):
+        if isinstance(self._opt_method, gpflow.train.ScipyOptimizer):
+            self.minimize_scipy(maxiter)
+            return
+
         try:
             [t.start() for t in self.timers.values()]
             while self.timers[Trigger.ITER].elapsed < maxiter and \
