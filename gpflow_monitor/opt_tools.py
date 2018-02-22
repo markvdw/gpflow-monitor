@@ -321,6 +321,9 @@ class ManagedOptimisation:
 
     def set_optimiser(self, optimiser):
         self._opt_method = optimiser
+        if isinstance(self._opt_method, gpflow.train.ScipyOptimizer):
+            return  # no further setup needed
+
         # Setup optimiser variables etc
         self._opt_method.minimize(self.model, session=self.session,
                                   maxiter=0, global_step=self.global_step, var_list=self.var_list)
@@ -330,14 +333,33 @@ class ManagedOptimisation:
             for task in self.tasks:
                 task(self, force_run)
 
-    def minimize(self, maxiter=0, max_global_step=np.inf):
-        try:
-            [t.start() for t in self.timers.values()]
+    def _scipy_callback(self, state: np.ndarray):
+        # We need to manually unpack the flat state vector and assign it to the params:
+        optimizer = self._opt_method.optimizer  # get access to ExternalOptimizerInterface
+        var_vals = [
+            state[packing_slice] for packing_slice in optimizer._packing_slices
+        ]
+        self.session.run(optimizer._var_updates,
+                         feed_dict=dict(zip(optimizer._update_placeholders, var_vals)))
+
+        self.session.run(tf.assign_add(self.global_step, 1).op)
+        self.timers[Trigger.ITER].add(1)
+        self.callback(force_run=False)
+
+    def _minimize_loop(self, maxiter, max_global_step):
+        if isinstance(self._opt_method, gpflow.train.ScipyOptimizer):
+            self._opt_method.minimize(self.model, maxiter=maxiter, step_callback=self._scipy_callback)
+        else:
             while self.timers[Trigger.ITER].elapsed < maxiter and \
                     self.session.run(self.global_step) < max_global_step:
                 self.session.run([self._opt_method.minimize_operation])  # GPflow internal
                 self.timers[Trigger.ITER].add(1)
                 self.callback(force_run=False)
+
+    def minimize(self, maxiter=0, max_global_step=np.inf):
+        try:
+            [t.start() for t in self.timers.values()]
+            self._minimize_loop(maxiter, max_global_step)
         finally:
             self.model.anchor(self.session)
             self.callback(force_run=True)
