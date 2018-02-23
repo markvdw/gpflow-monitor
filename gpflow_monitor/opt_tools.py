@@ -268,16 +268,14 @@ class SaveImage(Task):
     Store and display matplotlib images
     """
     def __init__(self, sequence, trigger: Trigger, file_writer,
-                 plotting_function, name, num_channels=4):
+                 plotting_function, name):
         """
         :param plotting_function: this needs to return a matplotlib Figure object
-        :param num_channels: number of color channels (`1` for grayscale, `3` for RBG, and `4` for RBGA)
         """
         super().__init__(sequence, trigger)
         self.file_writer = file_writer
-        self.num_channels = num_channels
         self.plotting_function = plotting_function
-        self.im = tf.placeholder(tf.float64, [1, None, None, self.num_channels])
+        self.im = tf.placeholder(tf.float64, [1, None, None, None])
         self.op = tf.summary.image(name, self.im)
 
     def _event_handler(self, manager):
@@ -287,7 +285,7 @@ class SaveImage(Task):
         fig.savefig(buf, format='png', bbox_inches='tight')
 
         buf.seek(0)
-        image = tf.image.decode_png(buf.getvalue(), channels=self.num_channels)
+        image = tf.image.decode_png(buf.getvalue())
         image = manager.session.run(tf.expand_dims(image, 0))
         summary = manager.session.run([self.op, manager.global_step], {self.im: image})
         self.file_writer.add_summary(*summary)
