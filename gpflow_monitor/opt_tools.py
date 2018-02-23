@@ -136,7 +136,7 @@ class LmlTensorBoard(ModelTensorBoard):
         super().__init__(sequence, trigger, model, file_writer)
         self.minibatch_size = minibatch_size
         self._full_lml = tf.placeholder(gpflow.settings.tf_float, shape=())
-        self.summary = tf.summary.scalar("full lml", self._full_lml)
+        self.summary = tf.summary.scalar("full_lml", self._full_lml)
         self.verbose = verbose
 
     def _event_handler(self, manager):
@@ -162,7 +162,7 @@ class LmlTensorBoard(ModelTensorBoard):
         lml = lml / len(m.X._value)
 
         summary, step = manager.session.run([self.summary, manager.global_step],
-                                             feed_dict={self._full_lml: lml})
+                                            feed_dict={self._full_lml: lml})
         print("Full lml: %f (%.2e)" % (lml, lml))
         self.file_writer.add_summary(summary, step)
 
@@ -204,15 +204,25 @@ class PrintAllTimings(PrintTimings):
 
 
 class SaveFunction(Task):
+    """
+    Store and display the output of a function.
+    The function's output can have any shape.
+    """
     def __init__(self, sequence, trigger: Trigger, file_writer,
                  function, output_dims: np.ndarray, name):
+        """
+        :param function: function without arguments (can also be an autoflow function)
+        :param output_dims: np.array indicating the shape of `function` outputs
+         Note:  if `function` outputs scalar values, we recommand using
+                the `SaveScalarFunction` task
+        """
         super().__init__(sequence, trigger)
         self.file_writer = file_writer
         self.function = function
         self.output_dims = output_dims
         self.name = name
         self.pl = [tf.placeholder(tf.float64) for _ in np.array(self.output_dims).flatten()]
-        self.op = [tf.summary.scalar(self.name + "_" + str(i), self.pl[i]) 
+        self.op = [tf.summary.scalar(self.name + "_" + str(i), self.pl[i])
                         for i in range(len(self.pl))]
 
     def _event_handler(self, manager):
@@ -223,13 +233,24 @@ class SaveFunction(Task):
         for s in summaries:
             self.file_writer.add_summary(s, step)
 
+
 class SaveScalarFunction(SaveFunction):
+    """
+    Store and display the output of a scalar function.
+    """
     def __init__(self, sequence, trigger: Trigger, file_writer, function, name):
+        """
+        :param function: function without arguments, outputting a scalar
+        """
         super().__init__(sequence, trigger, file_writer, function, 1, name)
         self.pl = [tf.placeholder(tf.float64)]
         self.op = [tf.summary.scalar(self.name, self.pl[0])]
 
+
 class SaveFunctionAsHistogram(SaveFunction):
+    """
+    Store the function outputs as a histogram
+    """
     def __init__(self, *args):
         super().__init__(*args)
         self.pl = tf.placeholder(tf.float64, shape=self.output_dims)
@@ -242,40 +263,43 @@ class SaveFunctionAsHistogram(SaveFunction):
         self.file_writer.add_summary(*summary)
 
 
-class SaveImages(Task):
-    def __init__(self, sequence, trigger: Trigger, file_writer, 
-                 do_plotting, create_figure, name, num_channels=4):
+class SaveImage(Task):
+    """
+    Store and display matplotlib images
+    """
+    def __init__(self, sequence, trigger: Trigger, file_writer,
+                 plotting_function, name, num_channels=4):
         """
-        :param create_figure: function responsible for creating the figure and axes
-        :param do_plotting: function performing the actual plotting on the created axes           
+        :param plotting_function: this needs to return a matplotlib Figure object
+        :param num_channels: number of color channels (`1` for grayscale, `3` for RBG, and `4` for RBGA)
         """
         super().__init__(sequence, trigger)
         self.file_writer = file_writer
         self.num_channels = num_channels
-        self.do_plotting = do_plotting
-        self.create_figure = create_figure
-        self.im = tf.placeholder(tf.float64, [1, None, None, 3])
+        self.plotting_function = plotting_function
+        self.im = tf.placeholder(tf.float64, [1, None, None, self.num_channels])
         self.op = tf.summary.image(name, self.im)
 
     def _event_handler(self, manager):
-        fig, axes = self.create_figure()
-        self.do_plotting(fig, axes)
+        fig = self.plotting_function()
 
         buf = io.BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight')
+        fig.savefig(buf, format='png', bbox_inches='tight')
+
         buf.seek(0)
         image = tf.image.decode_png(buf.getvalue(), channels=self.num_channels)
         image = manager.session.run(tf.expand_dims(image, 0))
         summary = manager.session.run([self.op, manager.global_step], {self.im: image})
         self.file_writer.add_summary(*summary)
-        plt.close()
+
+        plt.close(fig)
+
 
 class ManagedOptimisation:
     def __init__(self, model: gpflow.models.Model, optimiser: gpflow.training.optimizer.Optimizer,
                  global_step, session=None, var_list=None):
-        self._opt_method = optimiser
-
         self.session = model.enquire_session(session)
+        self.var_list = var_list
 
         # Setup timers
         total_time = timer.Stopwatch()
@@ -288,24 +312,51 @@ class ManagedOptimisation:
         self.model = model
         self.global_step = global_step
 
+        self.set_optimiser(optimiser)
+
+    def set_optimiser(self, optimiser):
+        self._opt_method = optimiser
+        if isinstance(self._opt_method, gpflow.train.ScipyOptimizer):
+            return  # no further setup needed
 
         # Setup optimiser variables etc
-        self._opt_method.minimize(model, session=self.session,
-            maxiter=0, global_step=global_step, var_list=var_list)
+        self._opt_method.minimize(self.model, session=self.session,
+                                  maxiter=0, global_step=self.global_step, var_list=self.var_list)
 
     def callback(self, force_run):
         with self.timers[Trigger.OPTIMISATION_TIME].pause():
             for task in self.tasks:
                 task(self, force_run)
 
-    def minimize(self, maxiter=0):
-        try:
-            [t.start() for t in self.timers.values()]
-            while self.timers[Trigger.ITER].elapsed < maxiter:
+    def _scipy_callback(self, state: np.ndarray):
+        # We need to manually unpack the flat state vector and assign it to the params:
+        optimizer = self._opt_method.optimizer  # get access to ExternalOptimizerInterface
+        var_vals = [
+            state[packing_slice] for packing_slice in optimizer._packing_slices
+        ]
+        self.session.run(optimizer._var_updates,
+                         feed_dict=dict(zip(optimizer._update_placeholders, var_vals)))
+
+        self.session.run(tf.assign_add(self.global_step, 1).op)
+        self.timers[Trigger.ITER].add(1)
+        self.callback(force_run=False)
+
+    def _minimize_loop(self, maxiter, max_global_step):
+        if isinstance(self._opt_method, gpflow.train.ScipyOptimizer):
+            self._opt_method.minimize(self.model, maxiter=maxiter, step_callback=self._scipy_callback)
+        else:
+            while self.timers[Trigger.ITER].elapsed < maxiter and \
+                    self.session.run(self.global_step) < max_global_step:
                 self.session.run([self._opt_method.minimize_operation])  # GPflow internal
                 self.timers[Trigger.ITER].add(1)
                 self.callback(force_run=False)
+
+    def minimize(self, maxiter=0, max_global_step=np.inf):
+        try:
+            [t.start() for t in self.timers.values()]
+            self._minimize_loop(maxiter, max_global_step)
         finally:
+            self.model.anchor(self.session)
             self.callback(force_run=True)
             [t.stop() for t in self.timers.values()]
 
