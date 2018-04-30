@@ -83,7 +83,7 @@ class StoreSession(Task):
                                       for x in glob.glob(self.hist_path + "-*")])
                 restore_path = self.hist_path + "-%i" % latest_step
 
-        if restore_path is not None:
+        if restore_path is not None and restore_path is not False:
             print("Restoring session from `%s`." % restore_path)
             self.saver.restore(session, restore_path)
 
@@ -136,8 +136,10 @@ class LmlTensorBoard(ModelTensorBoard):
         super().__init__(sequence, trigger, model, file_writer)
         self.minibatch_size = minibatch_size
         self._full_lml = tf.placeholder(gpflow.settings.tf_float, shape=())
-        self.summary = tf.summary.scalar("full_lml", self._full_lml)
         self.verbose = verbose
+
+        # Overwrite default `self.summary` to contain only the full_lml op
+        self.summary = tf.summary.scalar("full_lml", self._full_lml)
 
     def _event_handler(self, manager):
         m = manager.model
@@ -350,6 +352,9 @@ class ManagedOptimisation:
                 self.callback(force_run=False)
 
     def minimize(self, maxiter=0, max_global_step=np.inf):
+        if self.session.run(self.global_step) >= max_global_step:
+            print("Skipping optimisation...")
+            return
         try:
             [t.start() for t in self.timers.values()]
             self._minimize_loop(maxiter, max_global_step)
