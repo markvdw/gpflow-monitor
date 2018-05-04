@@ -317,6 +317,7 @@ class ManagedOptimisation:
     def set_optimiser(self, optimiser):
         self._opt_method = optimiser
         if isinstance(self._opt_method, gpflow.train.ScipyOptimizer):
+            self.increment_global_step = tf.assign_add(self.global_step, 1).op
             return  # no further setup needed
 
         # Setup optimiser variables etc
@@ -337,7 +338,7 @@ class ManagedOptimisation:
         self.session.run(optimizer._var_updates,
                          feed_dict=dict(zip(optimizer._update_placeholders, var_vals)))
 
-        self.session.run(tf.assign_add(self.global_step, 1).op)
+        self.session.run(self.increment_global_step)
         self.timers[Trigger.ITER].add(1)
         self.callback(force_run=False)
 
